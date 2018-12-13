@@ -45,25 +45,7 @@
 #include "vmemcache.h"
 #include "vmemcache_heap.h"
 #include "vmemcache_repl.h"
-#include "ravl.h"
-
-/*
- * ravl_cmp -- (internal) ravl compare function
- */
-static int
-ravl_cmp(const void *lhs, const void *rhs)
-{
-	struct cache_entry *lce = (struct cache_entry *)lhs;
-	struct cache_entry *rce = (struct cache_entry *)rhs;
-
-	if (lce->key.ksize < rce->key.ksize)
-		return -1;
-
-	if (lce->key.ksize > rce->key.ksize)
-		return 1;
-
-	return memcmp(lce->key.key, rce->key.key, lce->key.ksize);
-}
+#include "critnib.h"
 
 /*
  * vmemcache_newU -- (internal) create a vmemcache
@@ -147,7 +129,7 @@ vmemcache_newU(const char *dir, size_t max_size, size_t fragment_size,
 		goto error_unmap;
 	}
 
-	cache->index = ravl_new(ravl_cmp);
+	cache->index = critnib_new();
 	if (cache->index == NULL) {
 		LOG(1, "indexing structure initialization failed");
 		goto error_destroy_heap;
@@ -161,7 +143,7 @@ vmemcache_newU(const char *dir, size_t max_size, size_t fragment_size,
 	return cache;
 
 error_destroy_index:
-	ravl_delete(cache->index);
+	critnib_delete(cache->index);
 error_destroy_heap:
 	vmcache_heap_destroy(cache->heap);
 error_unmap:
@@ -178,7 +160,7 @@ void
 vmemcache_delete(VMEMcache *cache)
 {
 	repl_p_destroy(&cache->repl);
-	ravl_delete(cache->index);
+	critnib_delete(cache->index);
 	vmcache_heap_destroy(cache->heap);
 	munmap(cache->addr, cache->size);
 	Free(cache);
@@ -250,7 +232,7 @@ vmemcache_put(VMEMcache *cache, const char *key, size_t ksize,
 
 	entry->value.refcount = 1; /* value 1 means it is in the index */
 
-	if (ravl_insert(cache->index, entry)) {
+	if (critnib_set(cache->index, entry)) {
 		ERR("inserting to the index failed");
 		goto error_exit;
 	}
@@ -372,25 +354,24 @@ vmemcache_find_key_remove(VMEMcache *cache, const char *key, size_t ksize,
 	e->key.ksize = ksize;
 	memcpy(e->key.key, key, ksize);
 
-	struct ravl_node *node;
-	node = ravl_find(cache->index, e, RAVL_PREDICATE_EQUAL);
-	Free(e);
-	if (node == NULL) {
-		ERR("cannot find an element with the given key in the index");
+	struct cache_entry *v = critnib_get(cache->index, e);
+	if (v == NULL) {
+		Free(e);
+		LOG(1, "cannot find an element with the given key in the index");
 		errno = EINVAL;
 		return 0;
 	}
 
-	e = ravl_data(node);
-
 	if (remove) {
-		ravl_remove(cache->index, node);
+		critnib_remove(cache->index, e);
 		/* do not increment refcount - mark it to be removed */
-		*entry = e;
+		*entry = v;
+		Free(e);
 		return 0;
 	}
 
-	*entry = vmemcache_entry_acquire(e);
+	Free(e);
+	*entry = vmemcache_entry_acquire(v);
 
 	return 0;
 }

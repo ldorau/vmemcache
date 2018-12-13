@@ -57,7 +57,7 @@ struct vmemcache {
 	void *addr;			/* mapping address */
 	size_t size;			/* mapping size */
 	struct heap *heap;		/* heap address */
-	struct ravl *index;		/* indexing structure */
+	struct critnib *index;		/* indexing structure */
 	struct repl_p repl;		/* replacement policy abstraction */
 	vmemcache_on_evict *on_evict;	/* callback on evict */
 	void *arg_evict;		/* argument for callback on evict */

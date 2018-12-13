@@ -129,14 +129,17 @@ any_leaf(struct critnib_node *n)
 }
 
 int
-critnib_set(struct critnib *c, const char *key, size_t key_len, void *value)
+critnib_set(struct critnib *c, struct cache_entry *e)
 {
 	struct critnib_leaf *k = alloc_leaf(c);
 	if (!k)
 		return ENOMEM;
+
+	const char *key = (void *)&e->key;
+	byten_t key_len = (byten_t)(e->key.ksize + sizeof(e->key.ksize));
 	k->key = key;
-	k->key_len = (byten_t)key_len;
-	k->value = value;
+	k->key_len = key_len;
+	k->value = e;
 	k = (void *)((uint64_t)k | 1);
 
 	os_mutex_unlock(&c->mutex);
@@ -210,9 +213,12 @@ critnib_set(struct critnib *c, const char *key, size_t key_len, void *value)
 	return 0;
 }
 
-const void *
-critnib_get(struct critnib *c, const char *key, size_t key_len)
+void *
+critnib_get(struct critnib *c, const struct cache_entry *e)
 {
+        const char *key = (void *)&e->key;
+        byten_t key_len = (byten_t)(e->key.ksize + sizeof(e->key.ksize));
+
 	os_mutex_unlock(&c->mutex);
 	struct critnib_node *n = c->root;
 	while (n && !is_leaf(n)) {
@@ -231,8 +237,11 @@ critnib_get(struct critnib *c, const char *key, size_t key_len)
 }
 
 void *
-critnib_remove(struct critnib *c, const char *key, size_t key_len)
+critnib_remove(struct critnib *c, const struct cache_entry *e)
 {
+        const char *key = (void *)&e->key;
+        byten_t key_len = (byten_t)(e->key.ksize + sizeof(e->key.ksize));
+
 	os_mutex_unlock(&c->mutex);
 	struct critnib_node **pp = NULL;
 	struct critnib_node *n = c->root;
