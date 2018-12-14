@@ -62,7 +62,7 @@ to_leaf(struct critnib_node *n)
 }
 
 /*
- * internal: slice_index --
+ * internal: slice_index -- get index of radix child at a given shift
  */
 static inline int
 slice_index(char b, bitn_t bit)
@@ -70,6 +70,9 @@ slice_index(char b, bitn_t bit)
 	return (b >> bit) & NIB;
 }
 
+/*
+ * critnib_new -- allocate a new hashmap
+ */
 struct critnib *
 critnib_new(void)
 {
@@ -81,6 +84,9 @@ critnib_new(void)
 	return c;
 }
 
+/*
+ * internal: recursively free a subtree
+ */
 static void
 delete_node(struct critnib_node *n)
 {
@@ -92,6 +98,9 @@ delete_node(struct critnib_node *n)
 		delete_node(n->child[i]);
 }
 
+/*
+ * critnib_delete -- free a hashmap
+ */
 void
 critnib_delete(struct critnib *c)
 {
@@ -100,6 +109,9 @@ critnib_delete(struct critnib *c)
 	free(c);
 }
 
+/*
+ * internal: zalloc a node
+ */
 static struct critnib_node *
 alloc_node(struct critnib *c)
 {
@@ -111,12 +123,21 @@ alloc_node(struct critnib *c)
 	return n;
 }
 
+/*
+ * internal: alloc a leaf
+ */
 static struct critnib_leaf *
 alloc_leaf(struct critnib *c)
 {
 	return malloc(sizeof(struct critnib_leaf));
 }
 
+/*
+ * internal: find any leaf in a subtree
+ *
+ * We know they're all identical up to the divergence point between a prefix
+ * shared by all of them vs the new key we're inserting.
+ */
 static struct critnib_node *
 any_leaf(struct critnib_node *n)
 {
@@ -128,6 +149,9 @@ any_leaf(struct critnib_node *n)
 	return NULL;
 }
 
+/*
+ * critnib_set -- insert a new entry
+ */
 int
 critnib_set(struct critnib *c, struct cache_entry *e)
 {
@@ -150,6 +174,11 @@ critnib_set(struct critnib *c, struct cache_entry *e)
 		return 0;
 	}
 
+	/*
+	 * Need to descend the tree twice: first to find a leaf that
+	 * represents a subtree whose all keys share a prefix at least as
+	 * long as the one common to the new key and that subtree.
+	 */
 	while (!is_leaf(n) && n->byte < key_len) {
 		struct critnib_node *nn =
 			n->child[slice_index(key[n->byte], n->bit)];
@@ -169,6 +198,7 @@ critnib_set(struct critnib *c, struct cache_entry *e)
 	ASSERT(is_leaf(n));
 	struct critnib_leaf *nk = to_leaf(n);
 
+	/* Find the divergence point, accurate to a byte. */
 	byten_t common_len = (nk->key_len < (byten_t)key_len)
 			    ? nk->key_len : (byten_t)key_len;
 	byten_t diff;
@@ -176,14 +206,17 @@ critnib_set(struct critnib *c, struct cache_entry *e)
 		if (nk->key[diff] != key[diff])
 			break;
 	}
+
 	if (diff >= common_len) {
-		// update or conflict between keys being a prefix of reach other
+		// update or conflict between keys being a prefix of each other
 		return EEXIST;
 	}
 
+	/* Calculate the divergence point within the single byte. */
 	char at = nk->key[diff] ^ key[diff];
 	bitn_t sh = util_mssb_index((uint32_t)at) & (bitn_t)~(SLICE - 1);
 
+	/* Descend into the tree again. */
 	n = c->root;
 	struct critnib_node **parent = &c->root;
 	while (n && !is_leaf(n) &&
@@ -192,12 +225,18 @@ critnib_set(struct critnib *c, struct cache_entry *e)
 		n = *parent;
 	}
 
+	/*
+	 * If the divergence point is at same nib as an existing node, and
+	 * the subtree there is empty, just place our leaf there and we're
+	 * done.  Obviously this can't happen if SLICE == 1.
+	 */
 	if (!n) {
 		*parent = (void *)k;
 		os_mutex_unlock(&c->mutex);
 		return 0;
 	}
 
+	/* If not, we need to insert a new node in the middle of an edge. */
 	if (!(n = alloc_node(c))) {
 		os_mutex_unlock(&c->mutex);
 		free(k);
@@ -213,6 +252,9 @@ critnib_set(struct critnib *c, struct cache_entry *e)
 	return 0;
 }
 
+/*
+ * critnib_get -- query a key
+ */
 void *
 critnib_get(struct critnib *c, const struct cache_entry *e)
 {
@@ -231,11 +273,21 @@ critnib_get(struct critnib *c, const struct cache_entry *e)
 		return NULL;
 
 	struct critnib_leaf *k = to_leaf(n);
+
+	/*
+	 * We checked only nibs at divergence points, have to re-check the
+	 * whole key.
+	 */
 	if (key_len != k->key_len || memcmp(key, k->key, key_len))
 		return NULL;
 	return k->value;
 }
 
+/*
+ * critnib_remove -- query and delete a key
+ *
+ * Neither the key nor its value are freed, just our private nodes.
+ */
 void *
 critnib_remove(struct critnib *c, const struct cache_entry *e)
 {
@@ -246,6 +298,8 @@ critnib_remove(struct critnib *c, const struct cache_entry *e)
 	struct critnib_node **pp = NULL;
 	struct critnib_node *n = c->root;
 	struct critnib_node **parent = &c->root;
+
+	/* First, do a get. */
 	while (n && !is_leaf(n)) {
 		if (n->byte >= key_len) {
 			os_mutex_unlock(&c->mutex);
@@ -269,6 +323,7 @@ critnib_remove(struct critnib *c, const struct cache_entry *e)
 
 	void *value = k->value;
 
+	/* Remove the entry (leaf). */
 	*parent = NULL;
 	free(k);
 
@@ -276,11 +331,14 @@ critnib_remove(struct critnib *c, const struct cache_entry *e)
 		os_mutex_unlock(&c->mutex);
 		return value;
 	}
+
+	/* Check if after deletion the node has just a single child left. */
 	n = *pp;
 	struct critnib_node *only_child = NULL;
 	for (int i = 0; i < SLNODES; i++) {
 		if (n->child[i]) {
 			if (only_child) {
+				/* Nope. */
 				os_mutex_unlock(&c->mutex);
 				return value;
 			}
@@ -288,6 +346,7 @@ critnib_remove(struct critnib *c, const struct cache_entry *e)
 		}
 	}
 
+	/* Yes -- shorten the tree's edge. */
 	ASSERT(only_child);
 	*pp = only_child;
 	free(n);
