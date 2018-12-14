@@ -349,7 +349,7 @@ critnib_remove(struct critnib *c, const struct cache_entry *e)
 	/* Yes -- shorten the tree's edge. */
 	ASSERT(only_child);
 	*pp = only_child;
-	free(n);
 	os_mutex_unlock(&c->mutex);
+	free(n);
 	return value;
 }
