@@ -357,7 +357,8 @@ vmemcache_find_key_remove(VMEMcache *cache, const char *key, size_t ksize,
 	struct cache_entry *v = critnib_get(cache->index, e);
 	if (v == NULL) {
 		Free(e);
-		LOG(1, "cannot find an element with the given key in the index");
+		LOG(1, "cannot find an element with the given key "
+			"in the index");
 		errno = EINVAL;
 		return 0;
 	}

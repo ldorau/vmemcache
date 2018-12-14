@@ -252,7 +252,7 @@ critnib_set(struct critnib *c, struct cache_entry *e)
 	n = c->root;
 	struct critnib_node **parent = &c->root;
 	while (n && !is_leaf(n) &&
-	       (n->byte < diff || (n->byte == diff && n->bit >= sh))) {
+			(n->byte < diff || (n->byte == diff && n->bit >= sh))) {
 		parent = &n->child[slice_index(key[n->byte], n->bit)];
 		n = *parent;
 	}
@@ -290,8 +290,8 @@ critnib_set(struct critnib *c, struct cache_entry *e)
 void *
 critnib_get(struct critnib *c, const struct cache_entry *e)
 {
-        const char *key = (void *)&e->key;
-        byten_t key_len = (byten_t)(e->key.ksize + sizeof(e->key.ksize));
+	const char *key = (void *)&e->key;
+	byten_t key_len = (byten_t)(e->key.ksize + sizeof(e->key.ksize));
 
 	os_mutex_unlock(&c->mutex);
 	struct critnib_node *n = c->root;
@@ -323,8 +323,8 @@ critnib_get(struct critnib *c, const struct cache_entry *e)
 void *
 critnib_remove(struct critnib *c, const struct cache_entry *e)
 {
-        const char *key = (void *)&e->key;
-        byten_t key_len = (byten_t)(e->key.ksize + sizeof(e->key.ksize));
+	const char *key = (void *)&e->key;
+	byten_t key_len = (byten_t)(e->key.ksize + sizeof(e->key.ksize));
 
 	os_mutex_unlock(&c->mutex);
 	struct critnib_node **pp = NULL;
