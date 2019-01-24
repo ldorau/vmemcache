@@ -47,11 +47,13 @@ struct repl_p_entry {
 	TAILQ_ENTRY(repl_p_entry) node;
 	void *data;
 	struct repl_p_entry **ptr_entry; /* pointer to be zeroed when evicted */
+	unsigned long long n_used;
 };
 
 struct repl_p_head {
 	os_mutex_t lock;
 	TAILQ_HEAD(head, repl_p_entry) first;
+	unsigned long long max_used;
 };
 
 /* forward declarations of replacement policy operations */
@@ -88,6 +90,16 @@ repl_p_lru_use(struct repl_p_head *head, struct repl_p_entry **ptr_entry);
 static void *
 repl_p_lru_evict(struct repl_p_head *head, struct repl_p_entry **ptr_entry);
 
+static int
+repl_p_lru_count_new(struct repl_p_head **head);
+
+static void
+repl_p_lru_count_use(struct repl_p_head *head, struct repl_p_entry **ptr_entry);
+
+static void *
+repl_p_lru_count_evict(struct repl_p_head *head,
+			struct repl_p_entry **ptr_entry);
+
 /* replacement policy operations */
 static const struct repl_p_ops repl_p_ops[VMEMCACHE_REPLACEMENT_NUM] = {
 {
@@ -103,6 +115,13 @@ static const struct repl_p_ops repl_p_ops[VMEMCACHE_REPLACEMENT_NUM] = {
 	.repl_p_insert	= repl_p_lru_insert,
 	.repl_p_use	= repl_p_lru_use,
 	.repl_p_evict	= repl_p_lru_evict,
+},
+{
+	.repl_p_new	= repl_p_lru_count_new,
+	.repl_p_delete	= repl_p_lru_delete,
+	.repl_p_insert	= repl_p_lru_insert,
+	.repl_p_use	= repl_p_lru_count_use,
+	.repl_p_evict	= repl_p_lru_count_evict,
 }
 };
 
@@ -293,4 +312,99 @@ repl_p_lru_evict(struct repl_p_head *head, struct repl_p_entry **ptr_entry)
 	Free(entry);
 
 	return data;
+}
+
+/*
+ * repl_p_lru_count_new -- (internal) create a new LRU replacement policy
+ */
+static int
+repl_p_lru_count_new(struct repl_p_head **head)
+{
+	struct repl_p_head *h = Zalloc(sizeof(struct repl_p_head));
+	if (h == NULL)
+		return -1;
+
+	util_mutex_init(&h->lock);
+	TAILQ_INIT(&h->first);
+	h->max_used = (unsigned long long)-1;
+	*head = h;
+
+	return 0;
+}
+
+/*
+ * repl_p_lru_count_use -- (internal) use the element
+ */
+static void
+repl_p_lru_count_use(struct repl_p_head *head, struct repl_p_entry **ptr_entry)
+{
+	ASSERTne(ptr_entry, NULL);
+
+	struct repl_p_entry *entry = *ptr_entry;
+	if (entry == NULL)
+		return;
+
+	if (__sync_fetch_and_add(&entry->n_used, 1) < head->max_used)
+		return;
+
+	util_mutex_lock(&head->lock);
+
+	TAILQ_MOVE_TO_TAIL(&head->first, entry, node);
+
+	util_mutex_unlock(&head->lock);
+}
+
+/*
+ * repl_p_lru_count_evict -- (internal) evict the element
+ */
+static void *
+repl_p_lru_count_evict(struct repl_p_head *head,
+			struct repl_p_entry **ptr_entry)
+{
+	struct repl_p_entry *entry;
+	void *data;
+
+	util_mutex_lock(&head->lock);
+
+	if (ptr_entry != NULL && ptr_entry != (void *)(-1)) {
+		entry = *ptr_entry;
+	} else {
+		entry = TAILQ_FIRST(&head->first);
+		if (entry == NULL)
+			goto exit_NULL;
+
+		struct repl_p_entry *next = TAILQ_NEXT(entry, node);
+		while (next != NULL && entry->n_used > next->n_used) {
+			entry->n_used = 0;
+			TAILQ_MOVE_TO_TAIL(&head->first, entry, node);
+			entry = next;
+			next = TAILQ_NEXT(entry, node);
+		}
+
+		if (ptr_entry == (void *)(-1) &&
+		    entry->n_used < head->max_used) {
+			head->max_used = entry->n_used;
+			fprintf(stderr, "max_used = %llu\n", head->max_used);
+		}
+	}
+
+	if (entry == NULL)
+		goto exit_NULL;
+
+	TAILQ_REMOVE(&head->first, entry, node);
+
+	ASSERTne(entry->ptr_entry, NULL);
+	*(entry->ptr_entry) = NULL;
+
+	util_mutex_unlock(&head->lock);
+
+	data = entry->data;
+
+	Free(entry);
+
+	return data;
+
+exit_NULL:
+	util_mutex_unlock(&head->lock);
+	return NULL;
 }

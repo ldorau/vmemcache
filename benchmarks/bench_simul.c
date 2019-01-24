@@ -76,6 +76,7 @@ static VMEMcache *cache;
 static const char *enum_repl[] = {
 	"none",
 	"LRU",
+	"LRU_counted",
 	0
 };
 
@@ -93,7 +94,7 @@ static struct param_t {
 	{ "cache_size", &cache_size, VMEMCACHE_MIN_POOL, -1ULL, NULL },
 	{ "cache_fragment_size", &cache_fragment_size, VMEMCACHE_MIN_FRAG,
 		4 * SIZE_GB, NULL },
-	{ "repl_policy", &repl_policy, 1, 1, enum_repl },
+	{ "repl_policy", &repl_policy, 1, 2, enum_repl },
 	{ "key_size", &key_size, 1, SIZE_GB, NULL },
 	{ "seed", &seed, 0, -1ULL, NULL },
 	{ 0 },
