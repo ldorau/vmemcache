@@ -47,11 +47,16 @@ struct repl_p_entry {
 	TAILQ_ENTRY(repl_p_entry) node;
 	void *data;
 	struct repl_p_entry **ptr_entry; /* pointer to be zeroed when evicted */
+	unsigned was_used;
+	unsigned i_used;
 };
 
 struct repl_p_head {
 	os_mutex_t lock;
 	TAILQ_HEAD(head, repl_p_entry) first;
+	unsigned max_used;
+	unsigned n_used;
+	struct repl_p_entry **used;
 };
 
 /* forward declarations of replacement policy operations */
@@ -184,6 +189,11 @@ repl_p_lru_new(struct repl_p_head **head)
 
 	util_mutex_init(&h->lock);
 	TAILQ_INIT(&h->first);
+	h->max_used = 256;
+	h->n_used = 0;
+	h->used = Zalloc(h->max_used * sizeof(void *));
+	if (h->used == NULL)
+		return -1;
 	*head = h;
 
 	return 0;
@@ -202,6 +212,7 @@ repl_p_lru_delete(struct repl_p_head *head)
 	}
 
 	util_mutex_destroy(&head->lock);
+	Free(head->used);
 	Free(head);
 }
 
@@ -233,6 +244,47 @@ repl_p_lru_insert(struct repl_p_head *head, void *element,
 }
 
 /*
+ * clear_used_array -- (internal) clear array of used elements
+ */
+static void
+clear_used_array(struct repl_p_head *head)
+{
+	unsigned max;
+
+	max = (head->n_used < head->max_used) ? head->n_used : head->max_used;
+	for (unsigned i = 0; i < max; i++) {
+		if (head->used[i] != NULL) {
+			TAILQ_MOVE_TO_TAIL(&head->first, head->used[i], node);
+			head->used[i]->was_used = 0;
+			head->used[i] = NULL;
+		}
+	}
+
+	head->n_used = 0;
+}
+
+/*
+ * get_used_index -- (internal) get index in array of used elements
+ */
+static unsigned
+get_used_index(struct repl_p_head *head)
+{
+	unsigned index = __sync_fetch_and_add(&head->n_used, 1);
+	if (index > head->max_used - 1) {
+		util_mutex_lock(&head->lock);
+
+		if (head->n_used >= head->max_used)
+			clear_used_array(head);
+
+		index = __sync_fetch_and_add(&head->n_used, 1);
+
+		util_mutex_unlock(&head->lock);
+	}
+
+	return index;
+}
+
+/*
  * repl_p_lru_use -- (internal) use the element
  */
 static void
@@ -240,12 +292,18 @@ repl_p_lru_use(struct repl_p_head *head, struct repl_p_entry **ptr_entry)
 {
 	ASSERTne(ptr_entry, NULL);
 
-	util_mutex_lock(&head->lock);
+	struct repl_p_entry *entry = *ptr_entry;
+	if (entry == NULL)
+		return;
 
-	if (*ptr_entry != NULL)
-		TAILQ_MOVE_TO_TAIL(&head->first, *ptr_entry, node);
-
-	util_mutex_unlock(&head->lock);
+	if (__sync_bool_compare_and_swap(&entry->was_used, 0, 1)) {
+		entry->i_used = get_used_index(head);
+		head->used[entry->i_used] = entry;
+		if (!__sync_bool_compare_and_swap(&entry->was_used, 1, 2)) {
+			ERR("repl_p_lru_use: was_used = 2");
+			abort();
+		}
+	}
 }
 
 /*
@@ -259,10 +317,13 @@ repl_p_lru_evict(struct repl_p_head *head, struct repl_p_entry **ptr_entry)
 
 	util_mutex_lock(&head->lock);
 
-	if (ptr_entry != NULL)
+	if (ptr_entry != NULL) {
 		entry = *ptr_entry;
-	else
+	} else {
+		if (head->n_used > 0)
+			clear_used_array(head);
 		entry = TAILQ_FIRST(&head->first);
+	}
 
 	if (entry == NULL) {
 		util_mutex_unlock(&head->lock);
@@ -273,6 +334,9 @@ repl_p_lru_evict(struct repl_p_head *head, struct repl_p_entry **ptr_entry)
 
 	ASSERTne(entry->ptr_entry, NULL);
 	*(entry->ptr_entry) = NULL;
+
+	if (entry->was_used == 2)
+		head->used[entry->i_used] = NULL;
 
 	util_mutex_unlock(&head->lock);
 
