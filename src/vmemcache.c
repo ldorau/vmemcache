@@ -410,6 +410,8 @@ vmemcache_get(VMEMcache *cache, const void *key, size_t ksize, void *vbuf,
 	if (ret < 0)
 		return -1;
 
+	util_fetch_and_add64(&cache->get_count, 1);
+
 	if (entry == NULL) { /* cache miss */
 		util_fetch_and_add64(&cache->miss_count, 1);
 
@@ -421,11 +423,13 @@ vmemcache_get(VMEMcache *cache, const void *key, size_t ksize, void *vbuf,
 		if (ret < 0)
 			return -1;
 
-		if (entry == NULL)
-			return 0;
-	}
+		util_fetch_and_add64(&cache->get_count, 1);
 
-	util_fetch_and_add64(&cache->get_count, 1);
+		if (entry == NULL) {
+			util_fetch_and_add64(&cache->miss_count, 1);
+			return 0;
+		}
+	}
 
 	if (cache->index_only)
 		goto get_index;
