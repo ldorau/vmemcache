@@ -43,21 +43,40 @@
 #include "sys/queue.h"
 #include "sys_util.h"
 
+/*
+ * Atomic store: lval = rval
+ * 'util_bool_compare_and_swap64' is used instead
+ * of 'util_atomic_store_explicit64' as a workaround,
+ * because 'util_atomic_store_explicit64' is not correctly recognized
+ * as an atomic instruction by Helgrind and DRD.
+ */
+#define ATOMIC_STORE(lval, rval)\
+	util_bool_compare_and_swap64(&(lval), (lval), (rval))
+
+/* atomic load lval = rval */
+#define ATOMIC_LOAD(lval, rval)\
+	util_atomic_load_explicit64(&(rval), &(lval), __ATOMIC_RELAXED)
+
 struct repl_p_entry {
 	TAILQ_ENTRY(repl_p_entry) node;
 	void *data;
 	struct repl_p_entry **ptr_entry; /* pointer to be zeroed when evicted */
+	stat_t promoted;
 };
 
 struct repl_p_head {
 	os_mutex_t lock;
 	TAILQ_HEAD(head, repl_p_entry) first;
+	stat_t promotion_delay;
+	get_counter_t get_counter;
+	void *arg;
 };
 
 /* forward declarations of replacement policy operations */
 
 static int
-repl_p_none_new(struct repl_p_head **head);
+repl_p_none_new(struct repl_p_head **head,
+			get_counter_t get_counter, void *arg);
 
 static void
 repl_p_none_delete(struct repl_p_head *head);
@@ -73,7 +92,8 @@ static void *
 repl_p_none_evict(struct repl_p_head *head, struct repl_p_entry **ptr_entry);
 
 static int
-repl_p_lru_new(struct repl_p_head **head);
+repl_p_lru_new(struct repl_p_head **head,
+			get_counter_t get_counter, void *arg);
 
 static void
 repl_p_lru_delete(struct repl_p_head *head);
@@ -110,7 +130,8 @@ static const struct repl_p_ops repl_p_ops[VMEMCACHE_REPLACEMENT_NUM] = {
  * repl_p_init -- allocate and initialize the replacement policy structure
  */
 struct repl_p *
-repl_p_init(enum vmemcache_replacement_policy rp)
+repl_p_init(enum vmemcache_replacement_policy rp,
+		get_counter_t get_counter, void *arg)
 {
 	struct repl_p *repl_p = Malloc(sizeof(struct repl_p));
 	if (repl_p == NULL)
@@ -118,7 +139,7 @@ repl_p_init(enum vmemcache_replacement_policy rp)
 
 	repl_p->ops = &repl_p_ops[rp];
 
-	if (repl_p->ops->repl_p_new(&repl_p->head)) {
+	if (repl_p->ops->repl_p_new(&repl_p->head, get_counter, arg)) {
 		Free(repl_p);
 		return NULL;
 	}
@@ -142,7 +163,7 @@ repl_p_destroy(struct repl_p *repl_p)
  * repl_p_none_new -- (internal) create a new "none" replacement policy
  */
 static int
-repl_p_none_new(struct repl_p_head **head)
+repl_p_none_new(struct repl_p_head **head, get_counter_t get_counter, void *arg)
 {
 	*head = NULL;
 	return 0;
@@ -183,12 +204,20 @@ repl_p_none_evict(struct repl_p_head *head, struct repl_p_entry **ptr_entry)
 	return NULL;
 }
 
+/*
+ * get_counter -- (internal) get counter
+ */
+static inline stat_t
+get_counter(struct repl_p_head *head)
+{
+	return (*head->get_counter)(head->arg);
+}
 
 /*
  * repl_p_lru_new -- (internal) create a new LRU replacement policy
  */
 static int
-repl_p_lru_new(struct repl_p_head **head)
+repl_p_lru_new(struct repl_p_head **head, get_counter_t get_counter, void *arg)
 {
 	struct repl_p_head *h = Zalloc(sizeof(struct repl_p_head));
 	if (h == NULL)
@@ -196,6 +225,10 @@ repl_p_lru_new(struct repl_p_head **head)
 
 	util_mutex_init(&h->lock);
 	TAILQ_INIT(&h->first);
+	h->promotion_delay = LONG_MAX;
+	h->get_counter = get_counter;
+	h->arg = arg;
+
 	*head = h;
 
 	return 0;
@@ -224,15 +257,19 @@ static struct repl_p_entry *
 repl_p_lru_insert(struct repl_p_head *head, void *element,
 			struct repl_p_entry **ptr_entry)
 {
-	struct repl_p_entry *entry = Zalloc(sizeof(struct repl_p_entry));
+	ASSERTne(ptr_entry, NULL);
+
+	struct repl_p_entry *entry = Malloc(sizeof(struct repl_p_entry));
 	if (entry == NULL)
 		return NULL;
 
-	entry->data = element;
+	stat_t counter_now = get_counter(head);
 
-	ASSERTne(ptr_entry, NULL);
+	entry->data = element;
 	entry->ptr_entry = ptr_entry;
-	*(entry->ptr_entry) = entry;
+	ATOMIC_STORE(entry->promoted, counter_now);
+	VALGRIND_ANNOTATE_HAPPENS_BEFORE(&entry->promoted);
+	ATOMIC_STORE(*(entry->ptr_entry), entry);
 
 	util_mutex_lock(&head->lock);
 
@@ -250,12 +287,30 @@ repl_p_lru_insert(struct repl_p_head *head, void *element,
 static void
 repl_p_lru_use(struct repl_p_head *head, struct repl_p_entry **ptr_entry)
 {
+	struct repl_p_entry *entry;
+
 	ASSERTne(ptr_entry, NULL);
+	ATOMIC_LOAD(entry, *ptr_entry);
+	if (entry == NULL)
+		return;
+
+	stat_t entry_promoted, promotion_delay;
+	VALGRIND_ANNOTATE_HAPPENS_AFTER(&entry->promoted);
+	ATOMIC_LOAD(entry_promoted, entry->promoted);
+	ATOMIC_LOAD(promotion_delay, head->promotion_delay);
+
+	stat_t counter_now = get_counter(head);
+
+	if (counter_now - entry_promoted <= promotion_delay)
+		return;
 
 	util_mutex_lock(&head->lock);
 
-	if (*ptr_entry != NULL)
-		TAILQ_MOVE_TO_TAIL(&head->first, *ptr_entry, node);
+	ATOMIC_LOAD(entry, *ptr_entry);
+	if (entry != NULL) {
+		TAILQ_MOVE_TO_TAIL(&head->first, entry, node);
+		ATOMIC_STORE(entry->promoted, counter_now);
+	}
 
 	util_mutex_unlock(&head->lock);
 }
@@ -267,30 +322,57 @@ static void *
 repl_p_lru_evict(struct repl_p_head *head, struct repl_p_entry **ptr_entry)
 {
 	struct repl_p_entry *entry;
-	void *data;
+	void *data = NULL;
 
 	util_mutex_lock(&head->lock);
 
-	if (ptr_entry != NULL)
+	if (ptr_entry != NULL) {
 		entry = *ptr_entry;
-	else
+	} else {
 		entry = TAILQ_FIRST(&head->first);
+		if (entry == NULL)
+			goto exit_unlock;
 
-	if (entry == NULL) {
-		util_mutex_unlock(&head->lock);
-		return NULL;
+		stat_t entry_promoted;
+		ATOMIC_LOAD(entry_promoted, entry->promoted);
+
+		stat_t counter_now = get_counter(head);
+//#if 0
+		struct repl_p_entry *next = TAILQ_NEXT(entry, node);
+		while (next != NULL) {
+			stat_t next_promoted;
+			ATOMIC_LOAD(next_promoted, next->promoted);
+
+			if (next_promoted >= entry_promoted)
+				break;
+
+			ATOMIC_STORE(entry->promoted, counter_now);
+			TAILQ_MOVE_TO_TAIL(&head->first, entry, node);
+
+			entry = next;
+			entry_promoted = next_promoted;
+
+			next = TAILQ_NEXT(entry, node);
+		}
+//#endif
+		stat_t delay = counter_now - entry_promoted;
+		if (head->promotion_delay > delay)
+			ATOMIC_STORE(head->promotion_delay, delay);
 	}
+
+
+	if (entry == NULL)
+		goto exit_unlock;
+
+	if (entry->ptr_entry)
+		ATOMIC_STORE(*(entry->ptr_entry), NULL);
 
 	TAILQ_REMOVE(&head->first, entry, node);
 
-	ASSERTne(entry->ptr_entry, NULL);
-	*(entry->ptr_entry) = NULL;
-
-	util_mutex_unlock(&head->lock);
-
 	data = entry->data;
-
 	Free(entry);
 
+exit_unlock:
+	util_mutex_unlock(&head->lock);
 	return data;
 }

@@ -49,7 +49,8 @@ struct repl_p_entry;
 struct repl_p_ops {
 	/* create a new replacement policy list */
 	int
-		(*repl_p_new)(struct repl_p_head **head);
+		(*repl_p_new)(struct repl_p_head **head,
+					get_counter_t get_counter, void *arg);
 
 	/* destroy the replacement policy list */
 	void
@@ -76,7 +77,8 @@ struct repl_p {
 	struct repl_p_head *head;
 };
 
-struct repl_p *repl_p_init(enum vmemcache_replacement_policy rp);
+struct repl_p *repl_p_init(enum vmemcache_replacement_policy rp,
+				get_counter_t get_counter, void *arg);
 void repl_p_destroy(struct repl_p *repl_p);
 
 #ifdef __cplusplus

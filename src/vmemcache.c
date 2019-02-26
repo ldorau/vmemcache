@@ -50,6 +50,15 @@
 #include "valgrind_internal.h"
 
 /*
+ * vmemcache_get_ops_counter -- get the statistic pseudo-time counter
+ */
+stat_t
+vmemcache_get_ops_counter(VMEMcache *cache)
+{
+	return cache->put_count + cache->get_count;
+}
+
+/*
  * vmemcache_newU -- (internal) create a vmemcache
  */
 #ifndef _WIN32
@@ -153,7 +162,9 @@ vmemcache_newU(const char *dir, size_t max_size, size_t fragment_size,
 		goto error_destroy_heap;
 	}
 
-	cache->repl = repl_p_init(replacement_policy);
+	cache->repl = repl_p_init(replacement_policy,
+					vmemcache_get_ops_counter,
+					(void *)cache);
 	if (cache->repl == NULL) {
 		LOG(1, "replacement policy initialization failed");
 		goto error_destroy_index;

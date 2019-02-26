@@ -97,11 +97,16 @@ struct cache_entry {
 /* type of callback deleting a cache entry */
 typedef void (*delete_entry_t)(struct cache_entry *entry);
 
+/* type of counter */
+typedef stat_t (*get_counter_t)(VMEMcache *cache);
+
 /* callback deleting a cache entry (of the above type 'delete_entry_t') */
 void vmemcache_delete_entry_cb(struct cache_entry *entry);
 
 void vmemcache_entry_acquire(struct cache_entry *entry);
 void vmemcache_entry_release(VMEMcache *cache, struct cache_entry *entry);
+
+stat_t vmemcache_get_ops_counter(VMEMcache *cache);
 
 #ifdef __cplusplus
 }
