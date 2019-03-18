@@ -51,7 +51,9 @@
 #define MAX_KEYSIZE 30
 
 typedef struct {
+	VMEMcache *vc;
 	bool evicted;
+	size_t used_size;
 } on_evict_info;
 
 typedef struct {
@@ -85,6 +87,16 @@ on_evict(VMEMcache *cache, const void *key, size_t key_size, void *arg)
 {
 	on_evict_info *info = (on_evict_info *)arg;
 	info->evicted = true;
+
+	char vbuf;
+	size_t vbufsize = sizeof(vbuf);
+	size_t vsize = 0; /* real size of the object */
+
+	if (vmemcache_get(info->vc, key, key_size,
+				&vbuf, vbufsize, 0, &vsize) == -1)
+		UT_FATAL("ERROR: vmemcache_get: %s", vmemcache_errormsg());
+
+	info->used_size -= vsize;
 }
 
 /*
@@ -220,7 +232,7 @@ put_until_timeout(VMEMcache *vc, const test_params *p)
 {
 	int ret = 1;
 
-	on_evict_info info = { false };
+	on_evict_info info = { vc, false, 0 };
 	vmemcache_callback_on_evict(vc, on_evict, &info);
 
 	/* print csv header */
@@ -255,7 +267,8 @@ put_until_timeout(VMEMcache *vc, const test_params *p)
 		}
 
 		/* generate value */
-		val_size = get_granular_rand_size(p->val_max, p->extent_size);
+		val_size = get_granular_rand_size(p->val_max,
+							p->extent_size - 32);
 
 		/* put */
 		int ret = vmemcache_put(vc, key, (size_t)len, val, val_size);
@@ -264,6 +277,8 @@ put_until_timeout(VMEMcache *vc, const test_params *p)
 					vmemcache_errormsg());
 			goto exit_free;
 		}
+
+		info.used_size += val_size;
 
 #ifdef STATS_ENABLED
 		if (vmemcache_get_stat(vc, VMEMCACHE_STAT_POOL_SIZE_USED,
@@ -280,6 +295,12 @@ put_until_timeout(VMEMcache *vc, const test_params *p)
 		used_size = p->pool_size;
 #endif /* STATS_ENABLED */
 
+		size_t diff = used_size - info.used_size;
+		// printf("used_size - info.used_size = %llu\n", diff);
+		// UT_ASSERTeq(info.used_size, used_size);
+
+		used_size = info.used_size;
+
 		/*
 		 * Do not print the csv line if current ratio value is the same
 		 * (taking precision into account) as the previous one. The
@@ -289,8 +310,9 @@ put_until_timeout(VMEMcache *vc, const test_params *p)
 		if (info.evicted && ratio < min_ratio) {
 			min_ratio = ratio;
 			if (!p->print_output)
-				printf("minimum ratio = %f (key = %zu)\n",
-					ratio, keynum);
+				printf(
+					"minimum ratio = %f (key = %zu) (diff = %zu)\n",
+					ratio, keynum, diff);
 		}
 
 		if (p->print_output) {
