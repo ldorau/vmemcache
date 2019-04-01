@@ -229,6 +229,7 @@ put_until_timeout(VMEMcache *vc, const test_params *p)
 
 	float prev_ratio;
 	float ratio = 0.0f;
+	float min_ratio = 100.0f;
 	bool print_ratio = false;
 
 	char *val = malloc(p->val_max);
@@ -285,6 +286,13 @@ put_until_timeout(VMEMcache *vc, const test_params *p)
 		 * intent is to avoid unnecessary bloating of the csv output.
 		 */
 		ratio = (float)used_size / (float)p->pool_size;
+		if (info.evicted && ratio < min_ratio) {
+			min_ratio = ratio;
+			if (!p->print_output)
+				printf("minimum ratio = %f (key = %zu)\n",
+					ratio, keynum);
+		}
+
 		if (p->print_output) {
 			print_ratio = keynum == 0 || lroundf(ratio * 100)
 				!= lroundf(prev_ratio * 100);
